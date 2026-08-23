@@ -53,7 +53,7 @@ function amat_hitrate_model()
 
     policies = unique(T.policy);
     colours = lines(numel(policies));
-    markers = {'o', 's', '^', 'd'};
+    markers = {'o', 's', '^', 'd', 'p'};
     for i = 1:numel(policies)
         mask = strcmp(T.policy, policies{i});
         scatter(1 - T.hit_rate(mask), T.amat(mask), 60, colours(i, :), ...

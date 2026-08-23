@@ -1,6 +1,6 @@
-# Cache Politics: Replacement Policy Trade-offs for SSNIT Records Processing
+# Project 7 — Cache Politics: Replacement Policy Trade-offs for SSNIT Records Processing
 
-**CPEN 438 — Advanced Computer Architecture Systems and Design**
+**CPEN 315 / CPEN 733 — Advanced Computer Architecture Systems and Design**
 **Group 2 — Topic 7**
 
 ## Purpose
@@ -87,13 +87,35 @@ above are trusted, per the project's testing requirement. See
 `docs/hand_trace_derivation.md` for the by-hand working this test
 encodes.
 
+## Run the post-scan recovery analysis (Week 3)
+
+```bash
+cd python
+python3 post_scan_recovery.py --sim ../src/cache_sim \
+    --trace ../traces/ssnit_seed2_scan.trace \
+    --size 1024 --assoc 4 --block 64 --out-dir ../results --window 200
+```
+
+Writes `results/post_scan_recovery.csv` and `results/post_scan_recovery.png`,
+showing windowed hit rate for every policy (including OPT) starting from
+the moment the audit scan ends. This is the plot that makes ARC's
+faster-than-LRU recovery visible directly, rather than only as a
+single aggregate hit-rate number.
+
 ## Cross-check the analytical model
 
 In MATLAB, from `matlab/`:
 ```matlab
 amat_hitrate_model
 ```
-(requires `results/experiment_matrix.csv` to already exist.)
+(requires `results/experiment_matrix.csv` to already exist — regenerate
+it with `analyze_cache_results.py` first if you've re-run experiments.)
+Expect console output ending in `PASS: analytical model matches
+simulator output within 0.05 cycles.` plus a saved
+`results/amat_sensitivity_model.png`. (A Python-only cross-check of the
+same formula against the current `experiment_matrix.csv` — for use if
+MATLAB/Octave isn't installed on your machine — confirms a residual of
+~1e-15 cycles, i.e. floating-point noise; see Week 3 report §4.)
 
 ## Reproducing this team's seed
 
@@ -112,5 +134,8 @@ seed reproduces byte-identical traces.
 - [x] Trace generator (recency-heavy + scan-heavy, seeded)
 - [x] Experiment-matrix runner + plots
 - [x] MATLAB analytical AMAT model + validation cross-check
-- [ ] OPT (Belady) comparison — Level 3 extension, targeted for Week 3
-- [ ] Victim-cache extension — Level 3 extension, targeted for Week 3
+- [x] OPT (Belady) comparison — implemented Week 3, confirmed upper bound in all 30 experiment-matrix rows
+- [x] Post-scan hit-rate recovery plot — Week 3
+- [x] MATLAB AMAT model — Python cross-check passing; MATLAB run pending on team hardware
+- [ ] Innovation challenge (scan-detection heuristic) — designed Week 3 (docs/innovation_scan_detection.md), implementation targeted for Week 4
+- [ ] Victim-cache extension — Advanced-level extension, optional for Week 4

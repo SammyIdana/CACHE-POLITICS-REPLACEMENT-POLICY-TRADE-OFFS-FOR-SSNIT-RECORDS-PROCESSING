@@ -23,7 +23,7 @@ import re
 import os
 import csv
 
-POLICIES = ["lru", "fifo", "random", "arc"]
+POLICIES = ["lru", "fifo", "random", "arc", "opt"]
 TRACE_TYPES = ["recency", "scan"]
 
 
