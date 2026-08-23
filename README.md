@@ -1,6 +1,6 @@
-# Project 7 — Cache Politics: Replacement Policy Trade-offs for SSNIT Records Processing
+# Cache Politics: Replacement Policy Trade-offs for SSNIT Records Processing
 
-**CPEN 315 / CPEN 733 — Advanced Computer Architecture Systems and Design**
+**CPEN 438 — Advanced Computer Architecture Systems and Design**
 **Group 2 — Topic 7**
 
 ## Purpose
