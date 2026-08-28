@@ -28,6 +28,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <inttypes.h>
+#include <limits.h>
 #include <math.h>
 #include <time.h>
 
@@ -35,7 +37,7 @@
  * Configuration & CLI parsing
  * ------------------------------------------------------------------- */
 
-typedef enum { POLICY_LRU, POLICY_FIFO, POLICY_RANDOM, POLICY_ARC } policy_t;
+typedef enum { POLICY_LRU, POLICY_FIFO, POLICY_RANDOM, POLICY_ARC, POLICY_OPT } policy_t;
 
 typedef struct {
     policy_t policy;
@@ -49,6 +51,8 @@ typedef struct {
     char     out_path[512];
     char     label[128];
     int      have_out;
+    char     dump_hits_path[512];
+    int      have_dump_hits;
 } config_t;
 
 static void usage(const char *prog) {
@@ -56,7 +60,8 @@ static void usage(const char *prog) {
         "Usage: %s --policy {lru,fifo,random,arc} --size <bytes> --assoc <ways>\n"
         "          --block <bytes> --trace <file> [--seed <int>]\n"
         "          [--hit-time <cycles>] [--miss-penalty <cycles>]\n"
-        "          [--out <csv-file>] [--label <string>]\n", prog);
+        "          [--out <csv-file>] [--label <string>] [--dump-hits <file>]\n"
+        "Policies: lru, fifo, random, arc, opt (opt = Belady's offline optimal)\n", prog);
 }
 
 static policy_t parse_policy(const char *s) {
@@ -64,6 +69,7 @@ static policy_t parse_policy(const char *s) {
     if (strcmp(s, "fifo") == 0)   return POLICY_FIFO;
     if (strcmp(s, "random") == 0) return POLICY_RANDOM;
     if (strcmp(s, "arc") == 0)    return POLICY_ARC;
+    if (strcmp(s, "opt") == 0)    return POLICY_OPT;
     fprintf(stderr, "Unknown policy '%s'\n", s);
     exit(1);
 }
@@ -74,6 +80,7 @@ static const char *policy_name(policy_t p) {
         case POLICY_FIFO:   return "FIFO";
         case POLICY_RANDOM: return "RANDOM";
         case POLICY_ARC:    return "ARC";
+        case POLICY_OPT:    return "OPT";
     }
     return "?";
 }
@@ -107,6 +114,9 @@ static void parse_args(int argc, char **argv, config_t *cfg) {
             strncpy(cfg->out_path, argv[++i], sizeof(cfg->out_path) - 1); cfg->have_out = 1;
         } else if (strcmp(argv[i], "--label") == 0 && i + 1 < argc) {
             strncpy(cfg->label, argv[++i], sizeof(cfg->label) - 1);
+        } else if (strcmp(argv[i], "--dump-hits") == 0 && i + 1 < argc) {
+            strncpy(cfg->dump_hits_path, argv[++i], sizeof(cfg->dump_hits_path) - 1);
+            cfg->have_dump_hits = 1;
         } else {
             fprintf(stderr, "Unrecognised argument: %s\n", argv[i]);
             usage(argv[0]); exit(1);
@@ -250,6 +260,48 @@ static int arc_access(arc_set_t *as, uint64_t tag) {
 }
 
 /* ---------------------------------------------------------------------
+ * OPT (Belady) support: offline optimal replacement.
+ *
+ * Requires whole-trace knowledge, so the trace is loaded into memory
+ * up front (set_idx[]/tag[] arrays) regardless of policy -- trace
+ * sizes in this project (tens of thousands of accesses) make this
+ * trivial memory-wise, and it also gives every policy the same
+ * --dump-hits capability for free.
+ *
+ * next_occurrence[i] = index of the next future access to the same
+ * (set,tag) as access i, or INT64_MAX if it never recurs. Computed
+ * with one backward pass using an open-addressing hash table keyed on
+ * (set,tag).
+ * ------------------------------------------------------------------- */
+
+typedef struct { int used; int set; uint64_t tag; int64_t last_idx; } opt_hash_slot_t;
+
+static uint64_t opt_hash(int set, uint64_t tag, uint64_t cap) {
+    uint64_t h = ((uint64_t) set * 1099511628211ULL) ^ (tag * 14695981039346656037ULL);
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdULL; h ^= h >> 33;
+    return h & (cap - 1);
+}
+
+static int64_t *opt_compute_next_occurrence(int *set_arr, uint64_t *tag_arr, long long n) {
+    uint64_t cap = 16;
+    while (cap < (uint64_t) n * 2) cap <<= 1;
+    opt_hash_slot_t *table = calloc(cap, sizeof(opt_hash_slot_t));
+    int64_t *nxt = malloc(n * sizeof(int64_t));
+
+    for (long long i = n - 1; i >= 0; i--) {
+        uint64_t h = opt_hash(set_arr[i], tag_arr[i], cap);
+        while (table[h].used && !(table[h].set == set_arr[i] && table[h].tag == tag_arr[i]))
+            h = (h + 1) & (cap - 1);
+        nxt[i] = table[h].used ? table[h].last_idx : INT64_MAX;
+        table[h].used = 1; table[h].set = set_arr[i]; table[h].tag = tag_arr[i]; table[h].last_idx = i;
+    }
+    free(table);
+    return nxt;
+}
+
+typedef struct { int valid; uint64_t tag; int64_t next_use; } opt_line_t;
+
+/* ---------------------------------------------------------------------
  * Main simulation
  * ------------------------------------------------------------------- */
 
@@ -265,33 +317,77 @@ int main(int argc, char **argv) {
     FILE *tf = fopen(cfg.trace_path, "r");
     if (!tf) { fprintf(stderr, "Cannot open trace file %s\n", cfg.trace_path); return 1; }
 
+    /* Pass 1: load the whole trace into memory as decomposed (set,tag) pairs. */
+    long long cap_n = 4096, n = 0;
+    int *set_arr = malloc(cap_n * sizeof(int));
+    uint64_t *tag_arr = malloc(cap_n * sizeof(uint64_t));
+    char line_buf[128];
+    while (fgets(line_buf, sizeof(line_buf), tf)) {
+        if (line_buf[0] == '#' || line_buf[0] == '\n') continue;
+        if (n == cap_n) {
+            cap_n *= 2;
+            set_arr = realloc(set_arr, cap_n * sizeof(int));
+            tag_arr = realloc(tag_arr, cap_n * sizeof(uint64_t));
+        }
+        uint64_t addr = strtoull(line_buf, NULL, 10);
+        uint64_t block_addr = addr >> block_offset_bits;
+        set_arr[n] = (int) (block_addr & (uint64_t) (num_sets - 1));
+        tag_arr[n] = block_addr >> index_bits;
+        n++;
+    }
+    fclose(tf);
+
     line_t *lines = NULL;
     arc_set_t *arc_sets = NULL;
+    opt_line_t *opt_lines = NULL;
+    int64_t *nxt = NULL;
     if (cfg.policy == POLICY_ARC) {
         arc_sets = arc_set_init(num_sets, cfg.assoc);
+    } else if (cfg.policy == POLICY_OPT) {
+        opt_lines = calloc((size_t) num_sets * cfg.assoc, sizeof(opt_line_t));
+        nxt = opt_compute_next_occurrence(set_arr, tag_arr, n);
     } else {
         lines = calloc((size_t) num_sets * cfg.assoc, sizeof(line_t));
     }
 
     long long accesses = 0, hits = 0, misses = 0;
     uint64_t clock_counter = 0;
+    char *hit_dump = cfg.have_dump_hits ? malloc((size_t) n) : NULL;
 
-    /* post-scan recovery tracking: hit rate over sliding windows after
-     * the first very-long monotonically-increasing run seen in the trace
-     * (heuristic marker used only for the recovery plot in analysis) */
-    char line_buf[128];
-    while (fgets(line_buf, sizeof(line_buf), tf)) {
-        if (line_buf[0] == '#' || line_buf[0] == '\n') continue;
-        uint64_t addr = strtoull(line_buf, NULL, 10);
-        uint64_t block_addr = addr >> block_offset_bits;
-        int set_idx = (int) (block_addr & (uint64_t) (num_sets - 1));
-        uint64_t tag = block_addr >> index_bits;
+    for (long long i = 0; i < n; i++) {
+        int set_idx = set_arr[i];
+        uint64_t tag = tag_arr[i];
 
         accesses++;
         int hit = 0;
 
         if (cfg.policy == POLICY_ARC) {
             hit = arc_access(&arc_sets[set_idx], tag);
+        } else if (cfg.policy == POLICY_OPT) {
+            opt_line_t *set = &opt_lines[(size_t) set_idx * cfg.assoc];
+            int found = -1, empty = -1;
+            for (int w = 0; w < cfg.assoc; w++) {
+                if (set[w].valid && set[w].tag == tag) { found = w; break; }
+                if (!set[w].valid && empty < 0) empty = w;
+            }
+            if (found >= 0) {
+                hit = 1;
+                set[found].next_use = nxt[i];
+            } else {
+                int victim;
+                if (empty >= 0) {
+                    victim = empty;
+                } else {
+                    /* evict the resident line whose data is needed farthest
+                     * in the future (or never again -- INT64_MAX sorts last) */
+                    victim = 0;
+                    for (int w = 1; w < cfg.assoc; w++)
+                        if (set[w].next_use > set[victim].next_use) victim = w;
+                }
+                set[victim].valid = 1;
+                set[victim].tag = tag;
+                set[victim].next_use = nxt[i];
+            }
         } else {
             line_t *set = &lines[(size_t) set_idx * cfg.assoc];
             int found = -1, empty = -1;
@@ -321,9 +417,18 @@ int main(int argc, char **argv) {
             }
         }
 
+        if (hit_dump) hit_dump[i] = hit ? '1' : '0';
         if (hit) hits++; else misses++;
     }
-    fclose(tf);
+
+    if (hit_dump) {
+        FILE *hf = fopen(cfg.dump_hits_path, "w");
+        if (!hf) { fprintf(stderr, "Cannot open dump-hits file %s\n", cfg.dump_hits_path); return 1; }
+        fwrite(hit_dump, 1, (size_t) n, hf);
+        fputc('\n', hf);
+        fclose(hf);
+        free(hit_dump);
+    }
 
     double hit_rate = accesses ? (double) hits / (double) accesses : 0.0;
     double miss_rate = 1.0 - hit_rate;
@@ -351,6 +456,8 @@ int main(int argc, char **argv) {
     }
 
     if (lines) free(lines);
+    if (opt_lines) free(opt_lines);
+    if (nxt) free(nxt);
     if (arc_sets) {
         for (int s = 0; s < num_sets; s++) {
             free(arc_sets[s].t1); free(arc_sets[s].t2);
@@ -358,5 +465,7 @@ int main(int argc, char **argv) {
         }
         free(arc_sets);
     }
+    free(set_arr);
+    free(tag_arr);
     return 0;
 }
