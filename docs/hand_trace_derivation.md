@@ -76,3 +76,51 @@ Run `tests/test_hand_trace.py`, which encodes exactly this sequence and
 asserts the simulator's reported `hits`/`misses` for LRU, FIFO, and ARC
 against the table above. All three pass (see `tests/` for the script and
 its output).
+
+## Examples
+
+Run the automated hand-trace validator (recommended):
+
+```bash
+cd tests
+python3 test_hand_trace.py ../src/cache_sim
+```
+
+Expected test output (example):
+
+```
+[PASS] LRU    hits=1 (expected 1), misses=5 (expected 5)
+[PASS] FIFO   hits=2 (expected 2), misses=4 (expected 4)
+[PASS] ARC    hits=1 (expected 1), misses=5 (expected 5)
+
+All policies match the hand-traced validation sequence.
+```
+
+Run the simulator manually for a single policy using a small trace file:
+
+1. Create a trace file `handtrace_10access.trace` containing the six block addresses (one per line):
+
+```
+0
+64
+0
+128
+64
+192
+```
+
+2. Build and run the simulator (from repository root):
+
+```bash
+cd src
+gcc -O2 -Wall -o cache_sim cache_sim.c -lm
+./cache_sim --policy lru --size 128 --assoc 2 --block 64 --trace ../tests/handtrace_10access.trace
+```
+
+The simulator prints a single summary line that includes `hits=` and `misses=` which the test harness parses.
+
+Notes:
+
+- The automated test uses `../src/cache_sim` by default; pass a different binary path as the first argument to `test_hand_trace.py` if needed.
+- The trace file format is one decimal byte address per line; lines starting with `#` are ignored.
+

@@ -123,7 +123,7 @@ Team 2's assigned seed is **2** (see `docs/project_charter.md`). All
 generator invocations above assume `--seed 2`; re-running with the same
 seed reproduces byte-identical traces.
 
-## Status (as of Week 2 submission)
+## Status (as of Week 3 submission)
 
 - [x] Cache core: set-associative addressing, configurable size/assoc/block
 - [x] LRU replacement policy
